@@ -26,6 +26,10 @@
 
   var SCALES = { small: 150, medium: 200, large: 270 };
   var PAD = { top: 0.30, bottom: 0.06, side: 0.24 };
+  // Última posición del ratón conocida (coordenadas CSS del renderer).
+  // Se actualiza por el listener nativo de mousemove y se usa para refrescar
+  // el click-through cuando el cursor está quieto pero la ventana se mueve.
+  var lastMousePos = { x: 0, y: 0 };
 
   // ---------- resolve pet ----------
   var params = new URLSearchParams(location.search);
@@ -285,8 +289,9 @@
     var u = (cx - box.left) / box.w, v = (cy - box.top) / box.h;
     if (u < 0 || u > 1 || v < 0 || v > 1) return false;
     if (hitOK) {
-      var px = clamp(Math.floor(u * natW), 0, natW - 1), py = clamp(Math.floor(v * natH), 0, natH - 1);
-      try { return hitCtx.getImageData(px, py, 1, 1).data[3] > 20; } catch (e) { return true; }
+      var px = clamp(Math.floor(u * natW), 0, natW - 1);
+      var py = clamp(Math.floor(v * natH), 0, natH - 1);
+      return hitCtx.getImageData(px, py, 1, 1).data[3] > 20;
     }
     return true;
   }
@@ -298,6 +303,7 @@
   var pendingHop = null;
 
   window.addEventListener('mousemove', function (e) {
+    lastMousePos = { x: e.clientX, y: e.clientY };
     if (drag.active) {
       var dx = Number.isFinite(e.movementX) ? e.movementX : e.screenX - drag.lastX;
       var dy = Number.isFinite(e.movementY) ? e.movementY : e.screenY - drag.lastY;
@@ -308,7 +314,9 @@
       window.petAPI && window.petAPI.dragMove(drag.screenX, drag.screenY);
       return;
     }
-    setIgnore(!overPet(e.clientX, e.clientY));
+    if (overPet(e.clientX, e.clientY)) {
+      setIgnore(false);
+    }
   }, true);
 
   window.addEventListener('mousedown', function (e) {
@@ -330,7 +338,9 @@
       var reg = regionAt(e.clientX, e.clientY);
       pendingHop = setTimeout(function () { reactRegion(reg); }, 240);
     }
-    setIgnore(!overPet(e.clientX, e.clientY));
+    if (overPet(e.clientX, e.clientY)) {
+      setIgnore(false);
+    }
   }, true);
 
   window.addEventListener('blur', function () {
@@ -565,10 +575,17 @@
   // ---------- IPC ----------
   if (window.petAPI) {
     window.petAPI.onReact(function (type) { react(type); });
-    // Main polls the global cursor (window-relative coords) so click-through
-    // hit-testing is robust even when forwarded mousemove stalls or the pet
-    // wanders under a stationary cursor. Skip while dragging (ignore must stay off).
-    window.petAPI.onCursor(function (p) { if (!drag.active) setIgnore(!overPet(p.x, p.y)); });
+    // El click-through se gestiona desde dos fuentes:
+    // 1) mousemove nativo del renderer (coordenadas CSS correctas, mientras el
+    //   ventana no ignore eventos de ratón).
+    // 2) pet:cursor del main process (polling del cursor del SO, funciona aunque
+    //    setIgnoreMouseEvents esté activo). Recibe coordenadas ya relativas a
+    //    la ventana y hace hit-test alfa sobre ellas.
+    window.petAPI.onCursor(function (p) {
+      // No se usa para click-through en Linux/X11 por desajuste de coordenadas
+      // entre screen.getCursorScreenPoint() y los bounds de la ventana.
+      // El click-through se gestiona exclusivamente desde el mousemove nativo.
+    });
     window.petAPI.onLook(function (v) { anim.look.dx = v.dx; anim.look.dy = v.dy; });
     window.petAPI.onWalk(function (v) { anim.walking = true; anim.walkDir = v.dir; anim.facing = v.dir < 0 ? 1 : -1; startRun(); });
     window.petAPI.onWalkStop(function () { anim.walking = false; anim.facing = 1; stopRun(); });

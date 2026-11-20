@@ -1,20 +1,21 @@
 {
   "name": "ohmychiikawa",
   "version": "0.0.5",
-  "description": "Desktop pet for macOS & Windows. Ships with usagi.",
+  "description": "Desktop pet for macOS, Windows & Linux. Ships with usagi.",
   "main": "src/main.js",
   "bin": {
     "chiikawa": "chiikawa.js"
   },
   "scripts": {
-    "start": "electron .",
-    "usagi": "electron . --pet=usagi",
+    "start": "electron . --ozone-platform=x11 --disable-vulkan",
+    "usagi": "electron . --ozone-platform=x11 --disable-vulkan --pet=usagi",
     "chiikawa": "node chiikawa.js",
     "dist": "electron-builder --mac dmg --arm64 --x64",
     "dist:mac": "electron-builder --mac dmg --arm64 --x64",
     "dist:win": "electron-builder --win",
     "dist:win:nsis": "electron-builder --win nsis --x64",
-    "dist:win:portable": "electron-builder --win portable --x64"
+    "dist:win:portable": "electron-builder --win portable --x64",
+    "dist:linux": "electron-builder --linux appImage --x64 --arm64"
   },
   "keywords": [
     "desktop-pet",
@@ -42,6 +43,7 @@
       "chiikawa.js",
       "chiikawa.cmd",
       "chiikawa.ps1",
+      "chiikawa.sh",
       "package.json"
     ],
     "extraResources": [
@@ -119,6 +121,11 @@
     },
     "portable": {
       "artifactName": "${productName}-${version}-portable-x64.${ext}"
+    },
+    "linux": {
+      "target": ["appImage"],
+      "icon": "packaging/icon.png",
+      "category": "Entertainment"
     }
   },
   "devDependencies": {

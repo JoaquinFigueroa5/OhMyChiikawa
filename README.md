@@ -2,7 +2,7 @@
 
 **语言:** [简体中文](README.md) | [English](README.en.md) | [日本語](README.ja.md)
 
-OhMyChiikawa 是一个轻量的桌面宠物，支持 macOS 和 Windows。启动后，默认角色 **乌萨奇** 会出现在桌面上，你也可以在右键菜单里随时切换到 **吉伊（Chiikawa）**、**小八（Hachiware）** 或 **莫莫伽（Momonga）**。四个角色都可以拖动、点击互动、跟随鼠标、偶尔自己走动，也会在待机时眨眼和轻微摆动耳朵。
+OhMyChiikawa 是一个轻量的桌面宠物，支持 macOS、Windows 和 Linux。启动后，默认角色 **乌萨奇** 会出现在桌面上，你也可以在右键菜单里随时切换到 **吉伊（Chiikawa）**、**小八（Hachiware）** 或 **莫莫伽（Momonga）**。四个角色都可以拖动、点击互动、跟随鼠标、偶尔自己走动，也会在待机时眨眼和轻微摆动耳朵。
 
 ## 示例
 
@@ -74,6 +74,88 @@ chiikawa --pet usagi
 ```
 
 `chiikawa` 只是对 `OhMyChiikawa.exe` 的轻量包装，**无需 Node.js**。
+
+### Linux
+
+OhMyChiikawa se distribuye como AppImage (x64 / arm64) desde las Releases. También se puede ejecutar desde el código fuente.
+
+#### Requisitos
+
+- Node.js 18+
+- npm 9+
+
+#### Instalación desde código fuente
+
+```bash
+# Clonar el repositorio (si aún no lo has hecho)
+git clone https://github.com/WayneYe912/OhMyChiikawa.git
+cd OhMyChiikawa
+
+# Instalar dependencias (solo la primera vez)
+npm install
+```
+
+#### Iniciar la mascota
+
+Desde el código fuente:
+
+```bash
+npm start
+```
+
+O directamente con el CLI:
+
+```bash
+node chiikawa.js                      # Usagi por defecto, tamaño mediano
+node chiikawa.js --pet=usagi          # Elegir personaje
+node chiikawa.js --pet=chiikawa       # Chiikawa
+node chiikawa.js --pet=hachiware      # Hachiware
+node chiikawa.js --pet=momonga        # Momonga
+node chiikawa.js --size=small         # Tamaño pequeño
+node chiikawa.js --size=medium        # Tamaño mediano (predeterminado)
+node chiikawa.js --size=large         # Tamaño grande
+node chiikawa.js --pet=usagi --size=large  # Combinar opciones
+```
+
+También puedes usar el launcher shell:
+
+```bash
+./chiikawa.sh                         # Equivalente a `node chiikawa.js`
+./chiikawa.sh --pet=usagi --size=large
+```
+
+#### Hacer el comando `chiikawa` disponible globalmente (opcional)
+
+```bash
+sudo ln -s "$(pwd)/chiikawa.js" /usr/local/bin/chiikawa
+sudo chmod +x chiikawa.js
+```
+
+Después de esto, puedes ejecutar `chiikawa` desde cualquier directorio:
+
+```bash
+chiikawa
+chiikawa --pet=usagi --size=large
+```
+
+#### Notas específicas de Linux
+
+- **Transparencia de la ventana:** En **X11 con compositor** funciona normalmente. En **Wayland** el fondo puede verse opaco porque Electron/Chromium limita la transparencia de ventanas.
+- **«Siempre encima» y barra de tareas:** Depende del gestor de ventanas (GNOME, KDE, XFCE…).
+- **Error del sandbox (SUID):** Si al iniciar aparece un error sobre `chrome-sandbox`, ejecuta:
+
+```bash
+sudo chown root:root node_modules/electron/dist/chrome-sandbox
+sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+```
+
+#### Compilar para Linux (AppImage)
+
+```bash
+npm run dist:linux
+```
+
+Esto genera un AppImage en la carpeta `dist/`.
 
 ### 源码运行（macOS / Windows 通用）
 
@@ -149,10 +231,11 @@ https://raw.githubusercontent.com/WayneYe912/OhMyChiikawa/main/codex_pet/install
 
 ## 平台说明
 
-OhMyChiikawa 支持 macOS 和 Windows。
+OhMyChiikawa 支持 macOS、Windows 和 Linux。
 
 - **macOS**：提供 DMG 安装包（arm64 / x64），推荐直接从 Releases 页面下载安装。
 - **Windows**：提供 NSIS 安装包和便携版（均 x64），推荐直接下载安装。
+- **Linux**: AppImage (x64 / arm64) desde Releases, o ejecución desde código fuente con `node chiikawa.js` / `./chiikawa.sh`.
 
 ## 未来计划
 

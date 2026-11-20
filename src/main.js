@@ -115,8 +115,8 @@ function createWindow() {
   // loadFile handles platform path differences (Windows backslashes etc.)
   win.loadFile(path.join(__dirname, 'index.html'), { query: { pet: currentPet, scale: scaleName, lang } });
 
-  // start click-through; the renderer turns it off while the cursor is on the pet
-  win.setIgnoreMouseEvents(true, { forward: true });
+  // start click-through; el renderer gestiona el click-through con mousemove nativo
+  win.setIgnoreMouseEvents(false, { forward: true });
 
   win.on('closed', () => {
     dragging = false;
@@ -152,24 +152,11 @@ function normalizeRendererPoint(point) {
     x: point && Number.isFinite(point.x) ? point.x : 0,
     y: point && Number.isFinite(point.y) ? point.y : 0
   };
-  if (dragRendererPointIsPhysical && screen.screenToDipPoint) {
-    try {
-      const dip = screen.screenToDipPoint(raw);
-      if (Number.isFinite(dip.x) && Number.isFinite(dip.y)) return dip;
-    } catch (e) {}
-  }
   return raw;
 }
 
 function detectRendererPointMode(point) {
   dragRendererPointIsPhysical = false;
-  if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || !screen.screenToDipPoint) return;
-  try {
-    const raw = { x: point.x, y: point.y };
-    const dip = screen.screenToDipPoint(raw);
-    const cursor = screen.getCursorScreenPoint();
-    dragRendererPointIsPhysical = pointDistanceSq(dip, cursor) + 4 < pointDistanceSq(raw, cursor);
-  } catch (e) {}
 }
 
 function currentCursorPoint(fallback, preferFallback) {
@@ -424,9 +411,8 @@ function startLook() {
   lookTimer = setInterval(() => {
     if (!win || dragging) return;
     const c = screen.getCursorScreenPoint();
-    const b = win.getContentBounds();
-    // Window-relative cursor -> renderer alpha hit-test (always, for click-through).
-    win.webContents.send('pet:cursor', { x: c.x - b.x, y: c.y - b.y });
+    const b = win.getBounds();
+    win.webContents.send('pet:cursor', { x: c.x - b.x, y: c.y - b.y, winX: b.x, winY: b.y, curX: c.x, curY: c.y });
     if (!settings.follow) return;
     const cx = b.x + b.width / 2;
     const cy = b.y + b.height * 0.42; // around the face
@@ -452,7 +438,15 @@ function startWalk() {
   if (!win || dragging || !settings.wander) { scheduleWalk(); return; }
   restoreWindowSizeIfNeeded();
   let b = win.getBounds();
-  const area = screen.getDisplayNearestPoint({ x: b.x + b.width / 2, y: b.y + b.height / 2 }).bounds;
+  const disp = screen.getDisplayNearestPoint({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
+  let area = disp && disp.bounds ? disp.bounds : null;
+  // En algunos entornos Linux/Wayland los bounds del display pueden venir vacíos.
+  // Fallback al display primario para que el wander no se quede bloqueado.
+  if (!area || area.width <= 0 || area.height <= 0) {
+    const primary = screen.getPrimaryDisplay();
+    area = (primary && primary.bounds && primary.bounds.width > 0 && primary.bounds.height > 0) ? primary.bounds : null;
+  }
+  if (!area) { scheduleWalk(); return; }
   const dir = Math.random() < 0.5 ? -1 : 1;
   const distance = 80 + Math.random() * 220;
   const speed = PET_SPEED[currentPet] || 2; // usagi runs faster (it has a real run cycle)

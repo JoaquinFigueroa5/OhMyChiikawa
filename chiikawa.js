@@ -181,7 +181,7 @@ function start(opts) {
     process.exit(1);
   }
 
-  const args = ['.'];
+  const args = ['.', '--ozone-platform=x11', '--disable-vulkan'];
   if (opts.pet) args.push('--pet=' + opts.pet);
   if (opts.size) args.push('--scale=' + opts.size);
 
