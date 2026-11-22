@@ -2,8 +2,9 @@
 /*
  * OhMyChiikawa — desktop pet, main process.
  *
- * Creates a transparent, frameless, always-on-top window that hosts the pet,
- * and provides the "physical" behaviours that only the OS layer can do:
+ * Each shown pet is its own transparent, frameless, always-on-top BrowserWindow.
+ * The main process provides the "physical" behaviours that only the OS layer can
+ * do for every pet window:
  *   - moving the window (dragging, walking)
  *   - click-through on transparent pixels
  *   - the right-click context menu
@@ -16,6 +17,7 @@ const { app, BrowserWindow, ipcMain, Menu, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { clampWindowBounds, dragAreaForBounds, resolveDragBounds, resolveWalkPlan } = require('./window-geometry');
+const { normalizePetIds } = require('./pet-prefs');
 
 // ---------- encrypted image vault ----------
 // Decrypt assets.pak once here in the main process (which has full Node access);
@@ -41,14 +43,12 @@ function argValue(name, fallback) {
   const hit = process.argv.find((a) => a.startsWith(pre));
   return hit ? hit.slice(pre.length) : fallback;
 }
-// Persisted preferences — remembers the last chosen pet across launches.
+// Persisted preferences — remembers the chosen pets across launches.
 const PREFS_PATH = path.join(app.getPath('userData'), 'prefs.json');
 function loadPrefs() { try { return JSON.parse(fs.readFileSync(PREFS_PATH, 'utf8')); } catch (e) { return {}; } }
 function savePrefs() { try { fs.mkdirSync(path.dirname(PREFS_PATH), { recursive: true }); fs.writeFileSync(PREFS_PATH, JSON.stringify(prefs)); } catch (e) {} }
 const prefs = loadPrefs();
 
-// An explicit --pet on the CLI wins; otherwise restore the last chosen pet.
-let currentPet = argValue('pet', null) || prefs.pet || 'usagi';   // switchable from the right-click menu
 let lang = (['en', 'zh', 'ja'].includes(prefs.lang)) ? prefs.lang : 'zh';   // menu & speech language (switchable, remembered)
 const t = (zh, en, ja) => (lang === 'en' ? en : lang === 'ja' ? ja : zh); // pick the current language's string
 // Per-language character names for the menu (the main process has no pet registry).
@@ -58,6 +58,7 @@ const PET_LABELS = {
   hachiware: { zh: '小八', en: 'Hachiware', ja: 'ハチワレ' },
   momonga: { zh: '莫莫伽', en: 'Momonga', ja: 'モモンガ' }
 };
+const PET_IDS = Object.keys(PET_LABELS);
 const ROLL_PETS = new Set(['usagi']);           // pets that have the hand-roll action
 const PET_SPEED = { usagi: 3, chiikawa: 2, hachiware: 2, momonga: 2 }; // walk speed px/tick (16ms); default 2
 const petLabel = (id) => (PET_LABELS[id] ? PET_LABELS[id][lang] : id);
@@ -65,27 +66,59 @@ const SCALES = { small: 150, medium: 200, large: 270 }; // pet display height (p
 let scaleName = argValue('scale', 'medium');
 if (!SCALES[scaleName]) scaleName = 'medium';
 
+// A `--pet=a,b` launch argument replaces the remembered selection.
+const cliPets = (argValue('pet', '') || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter((id, i, all) => PET_LABELS[id] && all.indexOf(id) === i);
+const savedPetIds = () => normalizePetIds(prefs, PET_IDS, 'usagi');
+
 // ---------- runtime state ----------
-let win = null;
+const pets = [];   // one instance per open pet window, in opening order
 const settings = { follow: true, wander: true, onTop: true };
+let quitting = false; // set on app quit so closing windows does not shrink the saved selection
 
-let dragging = false;
-let dragOffset = { x: 0, y: 0 };
-let dragTimer = null;
-let lastDragMoveAt = 0;
-let lastDragCursor = null;
-let dragSize = null;
-let dragTrend = { x: 0, y: 0 };
-let dragRendererPointIsPhysical = false;
+let lookTimer = null;    // cursor poll shared by every pet window
 
-let walkTimer = null;    // active stroll stepper
-let walkPlan = null;     // scheduler for next stroll
-let lookTimer = null;    // cursor poll
-let lastLook = { dx: 0, dy: 0 };
+function newInstance(id) {
+  return {
+    id,
+    win: null,
+    // dragging
+    dragging: false,
+    dragOffset: { x: 0, y: 0 },
+    dragTimer: null,
+    lastDragMoveAt: 0,
+    lastDragCursor: null,
+    dragSize: null,
+    dragTrend: { x: 0, y: 0 },
+    // eye-follow smoothing
+    lookLast: { dx: 0, dy: 0 },
+    // wander
+    walkTimer: null,
+    walkPlan: null,
+    // sizing / placement
+    placed: false,
+    lastFitSize: null
+  };
+}
+
+function instanceFor(webContents) {
+  const win = BrowserWindow.fromWebContents(webContents);
+  return win ? pets.find((p) => p.win === win) || null : null;
+}
+
+function persistPets() {
+  prefs.pets = pets.map((p) => p.id);
+  delete prefs.pet;
+  savePrefs();
+}
 
 // ---------- window ----------
-function createWindow() {
-  win = new BrowserWindow({
+function createWindow(id) {
+  if (!PET_LABELS[id] || pets.some((p) => p.id === id)) return null;
+  const inst = newInstance(id);
+  const win = new BrowserWindow({
     width: 240,
     height: 320,
     show: false,
@@ -106,28 +139,53 @@ function createWindow() {
       backgroundThrottling: false // keep the pet animating while unfocused
     }
   });
+  inst.win = win;
+  pets.push(inst);
 
   win.setMenu(null);
-  applyOnTop();
+  applyOnTop(inst);
   if (process.platform === 'darwin' && app.dock) app.dock.hide();
   try { win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch (e) {}
 
   // loadFile handles platform path differences (Windows backslashes etc.)
-  win.loadFile(path.join(__dirname, 'index.html'), { query: { pet: currentPet, scale: scaleName, lang } });
+  win.loadFile(path.join(__dirname, 'index.html'), { query: { pet: id, scale: scaleName, lang } });
 
   // start click-through; el renderer gestiona el click-through con mousemove nativo
   win.setIgnoreMouseEvents(false, { forward: true });
 
-  win.on('closed', () => {
-    dragging = false;
-    stopDragPoll();
-    win = null;
+  win.webContents.once('did-finish-load', () => {
+    if (inst.win) scheduleWalk(inst);
   });
+
+  win.on('closed', () => {
+    stopDragPoll(inst);
+    if (inst.walkTimer) { clearInterval(inst.walkTimer); inst.walkTimer = null; }
+    clearTimeout(inst.walkPlan);
+    inst.walkPlan = null;
+    inst.win = null;
+    const i = pets.indexOf(inst);
+    if (i >= 0) pets.splice(i, 1);
+    // keep the last selection on quit; closing the final pet must not wipe it
+    if (!quitting && pets.length) persistPets();
+  });
+
+  return inst;
 }
 
-function applyOnTop() {
-  if (!win) return;
-  win.setAlwaysOnTop(settings.onTop, 'floating');
+function addPet(id) {
+  if (!PET_LABELS[id] || pets.some((p) => p.id === id)) return;
+  if (createWindow(id)) persistPets();
+}
+
+function removePet(id) {
+  if (pets.length <= 1) return; // the menu cannot leave zero pets
+  const inst = pets.find((p) => p.id === id);
+  if (inst && inst.win) inst.win.close();
+}
+
+function applyOnTop(inst) {
+  if (!inst.win) return;
+  inst.win.setAlwaysOnTop(settings.onTop, 'floating');
 }
 
 function workAreaForBounds(bounds) {
@@ -155,10 +213,6 @@ function normalizeRendererPoint(point) {
   return raw;
 }
 
-function detectRendererPointMode(point) {
-  dragRendererPointIsPhysical = false;
-}
-
 function currentCursorPoint(fallback, preferFallback) {
   if (preferFallback && fallback && Number.isFinite(fallback.x) && Number.isFinite(fallback.y)) {
     return normalizeRendererPoint(fallback);
@@ -173,41 +227,41 @@ function currentCursorPoint(fallback, preferFallback) {
   };
 }
 
-function moveDraggedWindow(cursor, trustCursor) {
-  if (!win) return;
-  const cur = win.getBounds();
+function moveDraggedWindow(inst, cursor, trustCursor) {
+  if (!inst.win) return;
+  const cur = inst.win.getBounds();
   const dragBounds = {
     x: cur.x,
     y: cur.y,
-    width: dragSize ? dragSize.width : cur.width,
-    height: dragSize ? dragSize.height : cur.height
+    width: inst.dragSize ? inst.dragSize.width : cur.width,
+    height: inst.dragSize ? inst.dragSize.height : cur.height
   };
-  const point = normalizeDragCursor(cursor, dragBounds, trustCursor);
+  const point = normalizeDragCursor(inst, cursor, dragBounds, trustCursor);
   const area = workAreaForDrag(dragBounds, point);
-  const next = resolveDragBounds(dragBounds, area, point, dragOffset);
-  dragOffset = next.offset;
+  const next = resolveDragBounds(dragBounds, area, point, inst.dragOffset);
+  inst.dragOffset = next.offset;
   if (next.bounds.x !== cur.x || next.bounds.y !== cur.y) {
-    win.setPosition(next.bounds.x, next.bounds.y);
+    inst.win.setPosition(next.bounds.x, next.bounds.y);
   }
 }
 
-function normalizeDragCursor(cursor, bounds, trustCursor) {
+function normalizeDragCursor(inst, cursor, bounds, trustCursor) {
   const point = { x: Math.round(cursor.x), y: Math.round(cursor.y) };
-  if (!lastDragCursor) {
-    lastDragCursor = point;
+  if (!inst.lastDragCursor) {
+    inst.lastDragCursor = point;
     return point;
   }
   const maxJump = Math.max(160, Math.max(bounds.width, bounds.height) * 1.2);
-  const dx = point.x - lastDragCursor.x;
-  const dy = point.y - lastDragCursor.y;
+  const dx = point.x - inst.lastDragCursor.x;
+  const dy = point.y - inst.lastDragCursor.y;
   if (!trustCursor && (Math.abs(dx) > maxJump || Math.abs(dy) > maxJump ||
-      (dragTrend.x > 0 && dx < -80) || (dragTrend.x < 0 && dx > 80) ||
-      (dragTrend.y > 0 && dy < -80) || (dragTrend.y < 0 && dy > 80))) {
-    return lastDragCursor;
+      (inst.dragTrend.x > 0 && dx < -80) || (inst.dragTrend.x < 0 && dx > 80) ||
+      (inst.dragTrend.y > 0 && dy < -80) || (inst.dragTrend.y < 0 && dy > 80))) {
+    return inst.lastDragCursor;
   }
-  if (Math.abs(dx) > 2) dragTrend.x = dx > 0 ? 1 : -1;
-  if (Math.abs(dy) > 2) dragTrend.y = dy > 0 ? 1 : -1;
-  lastDragCursor = point;
+  if (Math.abs(dx) > 2) inst.dragTrend.x = dx > 0 ? 1 : -1;
+  if (Math.abs(dy) > 2) inst.dragTrend.y = dy > 0 ? 1 : -1;
+  inst.lastDragCursor = point;
   return point;
 }
 
@@ -220,141 +274,148 @@ function clampDragOffset(offset, bounds) {
   };
 }
 
-function stopDragPoll() {
-  if (dragTimer) {
-    clearInterval(dragTimer);
-    dragTimer = null;
+function stopDragPoll(inst) {
+  if (inst.dragTimer) {
+    clearInterval(inst.dragTimer);
+    inst.dragTimer = null;
   }
 }
 
-function startDragPoll() {
-  stopDragPoll();
-  dragTimer = setInterval(() => {
-    if (!dragging || !win) return;
-    if (Date.now() - lastDragMoveAt < 80) return;
-    moveDraggedWindow(screen.getCursorScreenPoint(), false);
+function startDragPoll(inst) {
+  stopDragPoll(inst);
+  inst.dragTimer = setInterval(() => {
+    if (!inst.dragging || !inst.win) return;
+    if (Date.now() - inst.lastDragMoveAt < 80) return;
+    moveDraggedWindow(inst, screen.getCursorScreenPoint(), false);
   }, 16);
 }
 
 // ---------- sizing & placement ----------
 // Renderer measures the pet and asks for an exact window size (incl. motion
 // headroom). We keep the pet's bottom-centre anchored so menu resizes feel
-// stable, and place it bottom-right on first fit.
-let placed = false;
-let lastFitSize = null;
-function fitWindow(w, h) {
-  if (!win) return;
+// stable, and place each new pet bottom-right in a small cascade so they do not
+// stack exactly on top of each other.
+function fitWindow(inst, w, h) {
+  if (!inst.win) return;
   w = Math.max(60, Math.round(w));
   h = Math.max(60, Math.round(h));
-  lastFitSize = { width: w, height: h };
-  const cur = win.getBounds();
+  inst.lastFitSize = { width: w, height: h };
+  const cur = inst.win.getBounds();
   const disp = screen.getDisplayNearestPoint({ x: cur.x + cur.width / 2, y: cur.y + cur.height / 2 });
   const area = disp.workArea;
   let x, y;
-  if (!placed) {
-    x = area.x + area.width - w - 24;
+  if (!inst.placed) {
+    const index = Math.max(0, pets.indexOf(inst));
+    x = area.x + area.width - w - 24 - index * 36;
     y = area.y + area.height - h - 12;
-    placed = true;
+    inst.placed = true;
   } else {
     // keep bottom-centre fixed
     x = Math.round(cur.x + cur.width / 2 - w / 2);
     y = Math.round(cur.y + cur.height - h);
   }
   const next = clampWindowBounds({ x, y, width: w, height: h }, area);
-  win.setBounds(next);
-  if (!win.isVisible()) win.show();
+  inst.win.setBounds(next);
+  if (!inst.win.isVisible()) inst.win.show();
 }
 
-function restoreWindowSizeIfNeeded() {
-  if (!win || !lastFitSize) return;
-  const cur = win.getBounds();
-  if (Math.abs(cur.width - lastFitSize.width) <= 2 && Math.abs(cur.height - lastFitSize.height) <= 2) return;
-  const x = Math.round(cur.x + cur.width / 2 - lastFitSize.width / 2);
-  const y = Math.round(cur.y + cur.height - lastFitSize.height);
+function restoreWindowSizeIfNeeded(inst) {
+  if (!inst.win || !inst.lastFitSize) return;
+  const cur = inst.win.getBounds();
+  if (Math.abs(cur.width - inst.lastFitSize.width) <= 2 && Math.abs(cur.height - inst.lastFitSize.height) <= 2) return;
+  const x = Math.round(cur.x + cur.width / 2 - inst.lastFitSize.width / 2);
+  const y = Math.round(cur.y + cur.height - inst.lastFitSize.height);
   const area = screen.getDisplayNearestPoint({
     x: cur.x + cur.width / 2,
     y: cur.y + cur.height / 2
   }).bounds;
-  win.setBounds(clampWindowBounds({
+  inst.win.setBounds(clampWindowBounds({
     x: x,
     y: y,
-    width: lastFitSize.width,
-    height: lastFitSize.height
+    width: inst.lastFitSize.width,
+    height: inst.lastFitSize.height
   }, area));
 }
 
 // ---------- dragging ----------
-ipcMain.on('drag:start', (_e, pos) => {
-  if (!win) return;
-  restoreWindowSizeIfNeeded();
-  dragging = true;
-  lastDragMoveAt = Date.now();
-  detectRendererPointMode(pos);
+ipcMain.on('drag:start', (e, pos) => {
+  const inst = instanceFor(e.sender);
+  if (!inst || !inst.win) return;
+  restoreWindowSizeIfNeeded(inst);
+  inst.dragging = true;
+  inst.lastDragMoveAt = Date.now();
   const cursor = currentCursorPoint(pos, true);
-  const b = win.getBounds();
-  dragSize = { width: b.width, height: b.height };
-  lastDragCursor = { x: Math.round(cursor.x), y: Math.round(cursor.y) };
-  dragTrend = { x: 0, y: 0 };
-  dragOffset = clampDragOffset({ x: cursor.x - b.x, y: cursor.y - b.y }, b);
-  stopWalk();
-  startDragPoll();
+  const b = inst.win.getBounds();
+  inst.dragSize = { width: b.width, height: b.height };
+  inst.lastDragCursor = { x: Math.round(cursor.x), y: Math.round(cursor.y) };
+  inst.dragTrend = { x: 0, y: 0 };
+  inst.dragOffset = clampDragOffset({ x: cursor.x - b.x, y: cursor.y - b.y }, b);
+  stopWalk(inst);
+  startDragPoll(inst);
 });
-ipcMain.on('drag:move', (_e, pos) => {
-  if (!dragging || !win) return;
-  lastDragMoveAt = Date.now();
-  moveDraggedWindow(currentCursorPoint(pos, true), true);
+ipcMain.on('drag:move', (e, pos) => {
+  const inst = instanceFor(e.sender);
+  if (!inst || !inst.dragging || !inst.win) return;
+  inst.lastDragMoveAt = Date.now();
+  moveDraggedWindow(inst, currentCursorPoint(pos, true), true);
 });
-ipcMain.on('drag:end', () => {
-  dragging = false;
-  lastDragMoveAt = 0;
-  lastDragCursor = null;
-  dragSize = null;
-  dragTrend = { x: 0, y: 0 };
-  dragRendererPointIsPhysical = false;
-  stopDragPoll();
+ipcMain.on('drag:end', (e) => {
+  const inst = instanceFor(e.sender);
+  if (!inst) return;
+  inst.dragging = false;
+  inst.lastDragMoveAt = 0;
+  inst.lastDragCursor = null;
+  inst.dragSize = null;
+  inst.dragTrend = { x: 0, y: 0 };
+  stopDragPoll(inst);
 });
 
 // ---------- click-through ----------
-ipcMain.on('hit:ignore', (_e, ignore) => {
-  if (win) win.setIgnoreMouseEvents(!!ignore, { forward: true });
+ipcMain.on('hit:ignore', (e, ignore) => {
+  const inst = instanceFor(e.sender);
+  if (inst && inst.win) inst.win.setIgnoreMouseEvents(!!ignore, { forward: true });
 });
 
 // ---------- renderer lifecycle ----------
-ipcMain.on('pet:fit', (_e, size) => fitWindow(size.w, size.h));
-ipcMain.on('pet:quit', () => app.quit());
+ipcMain.on('pet:fit', (e, size) => {
+  const inst = instanceFor(e.sender);
+  if (inst) fitWindow(inst, size.w, size.h);
+});
+ipcMain.on('pet:quit', (e) => {
+  const inst = instanceFor(e.sender);
+  if (inst && inst.win) inst.win.close();
+  else app.quit();
+});
 
-// Swap the displayed pet by reloading the page with a new ?pet=. Cheap and robust:
-// the renderer rebuilds all layers for the new artwork on load. The cursor-follow
-// and wander timers live here in the main process, so they survive the reload.
-function switchPet(id) {
-  if (!win || id === currentPet || !PET_LABELS[id]) return;
-  currentPet = id;
-  prefs.pet = id; savePrefs();
-  win.loadFile(path.join(__dirname, 'index.html'), { query: { pet: currentPet, scale: scaleName, lang } });
-}
-
-// Switch the menu / speech language. The menu rebuilds on next open; the renderer
-// updates its speech lines live over IPC (no reload needed).
+// Switch the menu / speech language for every pet. The menu rebuilds on next
+// open; the renderers update their speech lines live over IPC (no reload needed).
 function setLang(l) {
   l = (['en', 'zh', 'ja'].includes(l)) ? l : 'zh';
   if (l === lang) return;
   lang = l;
   prefs.lang = lang; savePrefs();
-  if (win) win.webContents.send('pet:lang', lang);
+  pets.forEach((inst) => { if (inst.win) inst.win.webContents.send('pet:lang', lang); });
 }
 
 // ---------- context menu ----------
-ipcMain.on('menu:open', () => {
-  if (!win) return;
+ipcMain.on('menu:open', (e) => {
+  const inst = instanceFor(e.sender);
+  if (!inst || !inst.win) return;
+  const lastOne = pets.length <= 1;
   const tmpl = [
-    { label: petLabel(currentPet), enabled: false },
+    { label: petLabel(inst.id), enabled: false },
     { type: 'separator' },
     {
       label: t('角色', 'Character', 'キャラクター'),
-      submenu: Object.keys(PET_LABELS).map((id) => ({
-        label: petLabel(id), type: 'radio', checked: currentPet === id,
-        click: () => switchPet(id)
-      }))
+      submenu: PET_IDS.map((id) => {
+        const open = pets.some((p) => p.id === id);
+        return {
+          label: petLabel(id), type: 'checkbox', checked: open,
+          // the only open pet cannot be unchecked: that would close the app
+          enabled: !(open && lastOne),
+          click: () => { if (open) removePet(id); else addPet(id); }
+        };
+      })
     },
     {
       label: t('语言', 'Language', '言語'),
@@ -371,11 +432,14 @@ ipcMain.on('menu:open', () => {
     },
     {
       label: t('四处走动', 'Wander', 'うろうろ歩く'), type: 'checkbox', checked: settings.wander,
-      click: () => { settings.wander = !settings.wander; if (settings.wander) scheduleWalk(); else stopWalk(); }
+      click: () => {
+        settings.wander = !settings.wander;
+        if (settings.wander) pets.forEach(scheduleWalk); else pets.forEach(stopWalk);
+      }
     },
     {
       label: t('总在最前', 'Always on top', '常に最前面'), type: 'checkbox', checked: settings.onTop,
-      click: () => { settings.onTop = !settings.onTop; applyOnTop(); }
+      click: () => { settings.onTop = !settings.onTop; pets.forEach(applyOnTop); }
     },
     { type: 'separator' },
     {
@@ -383,17 +447,21 @@ ipcMain.on('menu:open', () => {
       submenu: ['small', 'medium', 'large'].map((s) => ({
         label: { small: t('小', 'Small', '小'), medium: t('中', 'Medium', '中'), large: t('大', 'Large', '大') }[s],
         type: 'radio', checked: scaleName === s,
-        click: () => { scaleName = s; if (win) win.webContents.send('scale:set', SCALES[s]); }
+        click: () => {
+          scaleName = s;
+          pets.forEach((p) => { if (p.win) p.win.webContents.send('scale:set', SCALES[s]); });
+        }
       }))
     },
-    { label: t('跳一下', 'Hop', 'ジャンプ'), click: () => win && win.webContents.send('pet:react', 'hop') },
-    ...(ROLL_PETS.has(currentPet)
-      ? [{ label: t('转手', 'Roll hands', '手をぐるぐる'), click: () => win && win.webContents.send('pet:react', 'roll') }]
+    { label: t('跳一下', 'Hop', 'ジャンプ'), click: () => inst.win && inst.win.webContents.send('pet:react', 'hop') },
+    ...(ROLL_PETS.has(inst.id)
+      ? [{ label: t('转手', 'Roll hands', '手をぐるぐる'), click: () => inst.win && inst.win.webContents.send('pet:react', 'roll') }]
       : []),
     { type: 'separator' },
-    { label: t('退出', 'Quit', '終了') + ' ' + petLabel(currentPet), click: () => app.quit() }
+    // closes this pet; the app quits when the last window closes
+    { label: t('退出', 'Quit', '終了') + ' ' + petLabel(inst.id), click: () => inst.win && inst.win.close() }
   ];
-  Menu.buildFromTemplate(tmpl).popup({ window: win });
+  Menu.buildFromTemplate(tmpl).popup({ window: inst.win });
 });
 
 // ---------- cursor poll: drives click-through hit-testing AND eye-follow ----------
@@ -404,40 +472,45 @@ ipcMain.on('menu:open', () => {
 // cursor (the window moves but no mousemove fires) — both leave the renderer's
 // toggle stuck, so the pet stops being draggable / right-clickable and clicks
 // fall through to the desktop. Polling the OS cursor fixes both, because IPC is
-// unaffected by the ignore state. The poll runs whenever the window is open;
-// `settings.follow` only gates the eye-follow message.
+// unaffected by the ignore state. One poll serves every pet window; a window
+// being dragged is skipped.
 function startLook() {
   stopLook();
   lookTimer = setInterval(() => {
-    if (!win || dragging) return;
-    const c = screen.getCursorScreenPoint();
-    const b = win.getBounds();
-    win.webContents.send('pet:cursor', { x: c.x - b.x, y: c.y - b.y, winX: b.x, winY: b.y, curX: c.x, curY: c.y });
-    if (!settings.follow) return;
-    const cx = b.x + b.width / 2;
-    const cy = b.y + b.height * 0.42; // around the face
-    const clamp = (v) => Math.max(-1, Math.min(1, v));
-    const dx = clamp((c.x - cx) / 360);
-    const dy = clamp((c.y - cy) / 360);
-    if (Math.abs(dx - lastLook.dx) > 0.03 || Math.abs(dy - lastLook.dy) > 0.03) {
-      lastLook = { dx, dy };
-      win.webContents.send('pet:look', { dx, dy });
+    if (!pets.length) return;
+    let c;
+    try { c = screen.getCursorScreenPoint(); } catch (e) { return; }
+    for (const inst of pets) {
+      if (!inst.win || inst.dragging) continue;
+      const b = inst.win.getBounds();
+      inst.win.webContents.send('pet:cursor', { x: c.x - b.x, y: c.y - b.y, winX: b.x, winY: b.y, curX: c.x, curY: c.y });
+      if (!settings.follow) continue;
+      const cx = b.x + b.width / 2;
+      const cy = b.y + b.height * 0.42; // around the face
+      const clamp = (v) => Math.max(-1, Math.min(1, v));
+      const dx = clamp((c.x - cx) / 360);
+      const dy = clamp((c.y - cy) / 360);
+      if (Math.abs(dx - inst.lookLast.dx) > 0.03 || Math.abs(dy - inst.lookLast.dy) > 0.03) {
+        inst.lookLast = { dx, dy };
+        inst.win.webContents.send('pet:look', { dx, dy });
+      }
     }
   }, 80);
 }
 function stopLook() { if (lookTimer) { clearInterval(lookTimer); lookTimer = null; } }
 
 // ---------- wander / edge-walk ----------
-function scheduleWalk() {
-  clearTimeout(walkPlan);
-  if (!settings.wander) return;
+function scheduleWalk(inst) {
+  clearTimeout(inst.walkPlan);
+  inst.walkPlan = null;
+  if (!settings.wander || !inst.win) return;
   const delay = 6000 + Math.random() * 9000;
-  walkPlan = setTimeout(startWalk, delay);
+  inst.walkPlan = setTimeout(() => startWalk(inst), delay);
 }
-function startWalk() {
-  if (!win || dragging || !settings.wander) { scheduleWalk(); return; }
-  restoreWindowSizeIfNeeded();
-  let b = win.getBounds();
+function startWalk(inst) {
+  if (!inst.win || inst.dragging || !settings.wander) { scheduleWalk(inst); return; }
+  restoreWindowSizeIfNeeded(inst);
+  let b = inst.win.getBounds();
   const disp = screen.getDisplayNearestPoint({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
   let area = disp && disp.bounds ? disp.bounds : null;
   // En algunos entornos Linux/Wayland los bounds del display pueden venir vacíos.
@@ -446,26 +519,26 @@ function startWalk() {
     const primary = screen.getPrimaryDisplay();
     area = (primary && primary.bounds && primary.bounds.width > 0 && primary.bounds.height > 0) ? primary.bounds : null;
   }
-  if (!area) { scheduleWalk(); return; }
+  if (!area) { scheduleWalk(inst); return; }
   const dir = Math.random() < 0.5 ? -1 : 1;
   const distance = 80 + Math.random() * 220;
-  const speed = PET_SPEED[currentPet] || 2; // usagi runs faster (it has a real run cycle)
+  const speed = PET_SPEED[inst.id] || 2; // usagi runs faster (it has a real run cycle)
   const plan = resolveWalkPlan(b, area, dir, distance, speed);
-  if (!plan) { stopWalk(); return; }
+  if (!plan) { stopWalk(inst); return; }
   if (plan.bounds.x !== b.x) {
-    win.setPosition(plan.bounds.x, b.y);
+    inst.win.setPosition(plan.bounds.x, b.y);
     b = Object.assign({}, b, { x: plan.bounds.x });
   }
   const targetX = plan.targetX;
-  win.webContents.send('pet:walk', { dir: plan.dir });
-  clearInterval(walkTimer);
-  walkTimer = setInterval(() => {
-    if (!win || dragging) { stopWalk(); return; }
-    const cur = win.getBounds();
+  inst.win.webContents.send('pet:walk', { dir: plan.dir });
+  clearInterval(inst.walkTimer);
+  inst.walkTimer = setInterval(() => {
+    if (!inst.win || inst.dragging) { stopWalk(inst); return; }
+    const cur = inst.win.getBounds();
     const remaining = targetX - cur.x;
     if (Math.abs(remaining) <= speed) {
-      win.setPosition(targetX, cur.y);
-      stopWalk();
+      inst.win.setPosition(targetX, cur.y);
+      stopWalk(inst);
       return;
     }
     const next = clampWindowBounds({
@@ -474,23 +547,24 @@ function startWalk() {
       width: cur.width,
       height: cur.height
     }, area);
-    if (next.x === cur.x) { stopWalk(); return; }
-    win.setPosition(next.x, cur.y);
+    if (next.x === cur.x) { stopWalk(inst); return; }
+    inst.win.setPosition(next.x, cur.y);
   }, 16);
 }
-function stopWalk() {
-  if (walkTimer) { clearInterval(walkTimer); walkTimer = null; }
-  if (win) win.webContents.send('pet:walk-stop');
-  scheduleWalk();
+function stopWalk(inst) {
+  if (inst.walkTimer) { clearInterval(inst.walkTimer); inst.walkTimer = null; }
+  if (inst.win) inst.win.webContents.send('pet:walk-stop');
+  scheduleWalk(inst);
 }
 
 // ---------- app lifecycle ----------
+app.on('before-quit', () => { quitting = true; });
 app.on('window-all-closed', () => app.quit());
 app.whenReady().then(() => {
-  createWindow();
-  win.webContents.once('did-finish-load', () => {
-    startLook(); // always polls: drives click-through; eye-follow gated by settings.follow
-    scheduleWalk();
+  const initial = cliPets.length ? cliPets : savedPetIds();
+  initial.forEach(createWindow);
+  startLook(); // always polls: drives click-through; eye-follow gated by settings.follow
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) savedPetIds().forEach(createWindow);
   });
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });

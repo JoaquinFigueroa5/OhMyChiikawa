@@ -7,7 +7,7 @@
  * devDependency. On `start` it checks the project's dependencies are present and
  * runs `npm install` automatically if anything is missing.
  *
- *   ./chiikawa.js [start] [--pet <id>] [--size small|medium|large]
+ *   ./chiikawa.js [start] [--pet <id>[,<id>...]] [--size small|medium|large]
  *   ./chiikawa.js pets        list the bundled pets
  *   ./chiikawa.js version     print the version
  *   ./chiikawa.js help        show usage
@@ -83,13 +83,14 @@ Usage:
   chiikawa help                         show this help
 
 Options (for start):
-  -p, --pet  <id>                      which pet to show        (default: usagi)
+  -p, --pet  <id[,id]>                 which pets to show       (default: usagi)
   -s, --size <small|medium|large>      on-screen size           (default: medium)
 
 Examples:
   chiikawa
   chiikawa start --size large
-  chiikawa -p usagi -s small`);
+  chiikawa -p usagi -s small
+  chiikawa -p usagi,chiikawa`);
 }
 
 // Minimal arg parser: supports "--key=val", "--key val", "-k val".
@@ -168,8 +169,10 @@ function start(opts) {
     process.exit(1);
   }
   const pets = listPets();
-  if (opts.pet && !pets.includes(opts.pet)) {
-    console.error(`Unknown pet "${opts.pet}". Available: ${pets.join(', ')}`);
+  const ids = (opts.pet || '').split(',').map((id) => id.trim()).filter(Boolean);
+  const unknown = ids.filter((id) => !pets.includes(id));
+  if (unknown.length) {
+    console.error(`Unknown pet "${unknown.join(', ')}". Available: ${pets.join(', ')}`);
     process.exit(1);
   }
   if (!ensureDeps()) process.exit(1);
@@ -182,7 +185,7 @@ function start(opts) {
   }
 
   const args = ['.', '--ozone-platform=x11', '--disable-vulkan'];
-  if (opts.pet) args.push('--pet=' + opts.pet);
+  if (ids.length) args.push('--pet=' + ids.join(','));
   if (opts.size) args.push('--scale=' + opts.size);
 
   spawn(electron, args, { cwd: ROOT, stdio: 'inherit' })

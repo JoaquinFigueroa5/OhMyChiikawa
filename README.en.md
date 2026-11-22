@@ -12,7 +12,7 @@ OhMyChiikawa is a lightweight desktop pet for macOS and Windows. After launch, t
 
 ## Features
 
-- Multiple characters: **Usagi**, **Chiikawa**, **Hachiware**, and **Momonga** are built in; switch anytime from the context menu, and your last choice is remembered.
+- Multiple characters: **Usagi**, **Chiikawa**, **Hachiware**, and **Momonga** are built in; tick several of them in the context menu to show them all at once (one per character), and your selection is remembered.
 - Three interface languages: switch between 中文 / English / 日本語 from the context menu; menu text and character speech follow the selected language, and the choice is remembered.
 - Transparent, frameless, and always on top by default.
 - Drag to place the pet anywhere on the desktop.
