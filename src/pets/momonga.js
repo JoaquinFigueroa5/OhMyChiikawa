@@ -42,15 +42,19 @@
     // canvas includes the detached droplets; 1.2x fills Momonga's padded window.
     actions: {
       roll: {
-        base: 'images/momonga_rolling/momonga_rolling_', count: 11, pad: 2, ext: '.png', start: 1,
-        fps: 11, loops: 2, scale: 1.2,
-        speech: { zh: '不要！不要！', en: 'No! No!', ja: 'やだ！やだ！' }
+        base: 'images/momonga_yada/momonga_yada_', count: 16, pad: 2, ext: '.png', start: 1,
+        fps: 7, loops: 1, scale: 1,
+        speech: { zh: '不要！不要不要！', en: 'Īyā! Yada yada!', ja: 'いや！やだやだ！' }
       }
     },
+    // Walking cycle played while wandering (6 frames re-canvased to Momonga's
+    // framing. Facing is flipped by the renderer via CSS scale(-1, 1), so only
+    // right-facing art is needed.)
+    walk: { base: 'images/momonga_walk/momonga_walk_', count: 6, pad: 2, ext: '.png', start: 1, fps: 6 },
     speech: {
       zh: ['哼哼～', '诶嘿嘿', '可爱吧？', '我也要！'],
-      en: ['Hehe~', 'Ehehe', 'Cute, right?', 'Me too!'],
-      ja: ['ふふん～', 'えへへ', 'かわいいでしょ？', 'ぼくも！']
+      en: ['Hehe~', 'Ehehe', 'Cute, right?', 'Me too!', 'Mī-tē!', 'Homero!'],
+      ja: ['ふふん～', 'えへへ', 'かわいいでしょ？', 'ぼくも！', 'み～て～！', '褒めろ！']
     }
   };
   var api = (typeof window !== 'undefined') ? window : globalThis;
